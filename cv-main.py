@@ -254,8 +254,8 @@ if data_pool:
         
         # 标签 (默认单位修改为 uA)
         c1, c2 = st.columns(2)
-        xlabel = c1.text_input("X 轴标签", "Potential (V vs. RHE)")
-        ylabel = c2.text_input("Y 轴标签", "Current (µA)") 
+        xlabel = c1.text_input("X 轴标签", "Potential (V)")
+        ylabel = c2.text_input("Y 轴标签", "Current (μA)") 
 
         # 配色
         cols = st.columns(len(sel))
