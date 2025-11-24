@@ -17,48 +17,81 @@ st.set_page_config(
 def parse_pssession(file):
     """
     解析 PalmSens .pssession (JSON格式) 文件
-    尝试从 measurements -> curves 中提取 x 和 y 数据
+    修复 'Extra data' 错误：使用 raw_decode 循环读取有效 JSON 块，忽略末尾垃圾数据
     """
     datasets = {}
     try:
-        content = file.read()
-        data_json = json.loads(content)
+        # 1. 获取文件内容并解码为字符串 (忽略非 UTF-8 的二进制尾部)
+        content = file.getvalue().decode('utf-8', errors='ignore')
         
-        # 兼容不同版本的 JSON 结构
-        measurements = []
-        if "measurements" in data_json:
-            measurements = data_json["measurements"]
-        elif "Measurements" in data_json:
-            measurements = data_json["Measurements"]
-        # 有些文件根节点就是单个 measurement
-        elif "curves" in data_json or "Curves" in data_json:
-            measurements = [data_json]
-
-        for m_idx, meas in enumerate(measurements):
-            title = meas.get("title", meas.get("Title", f"Meas_{m_idx+1}"))
+        # 2. 循环解析所有 JSON 对象
+        decoder = json.JSONDecoder()
+        pos = 0
+        all_json_objects = []
+        
+        while pos < len(content):
+            # 跳过空白字符
+            while pos < len(content) and content[pos].isspace():
+                pos += 1
+            if pos >= len(content):
+                break
             
-            # 获取曲线列表
-            curves = meas.get("curves", meas.get("Curves", []))
+            try:
+                # raw_decode 会返回解析出的对象和结束位置的索引
+                obj, end_pos = decoder.raw_decode(content, idx=pos)
+                all_json_objects.append(obj)
+                pos = end_pos
+            except json.JSONDecodeError:
+                # 如果遇到无法解析的部分（比如文件末尾的非JSON数据），直接停止，保留已解析的部分
+                break
+        
+        # 3. 在所有解析出的对象中寻找 measurement 数据
+        for data_json in all_json_objects:
+            measurements = []
             
-            for c_idx, curve in enumerate(curves):
-                # 尝试获取 x 和 y 数组
-                # PalmSens 常见键名: x, xValues, X, y, yValues, Y
-                x = curve.get("x", curve.get("xValues", curve.get("X", [])))
-                y = curve.get("y", curve.get("yValues", curve.get("Y", [])))
+            # 尝试不同的键名结构
+            if isinstance(data_json, dict):
+                if "measurements" in data_json:
+                    measurements = data_json["measurements"]
+                elif "Measurements" in data_json:
+                    measurements = data_json["Measurements"]
+                elif "curves" in data_json or "Curves" in data_json:
+                    # 有些对象直接就是 measurement 本身
+                    measurements = [data_json]
+            
+            # 遍历 measurement 提取曲线
+            for m_idx, meas in enumerate(measurements):
+                if not isinstance(meas, dict): continue
                 
-                if len(x) > 0 and len(y) > 0:
-                    # 构建名称
-                    name = f"{file.name.split('.')[0]}"
-                    if len(measurements) > 1:
-                        name += f"_{title}"
-                    if len(curves) > 1:
-                        name += f"_Curve{c_idx+1}"
+                title = meas.get("title", meas.get("Title", f"Meas"))
+                
+                # 获取曲线列表
+                curves = meas.get("curves", meas.get("Curves", []))
+                
+                for c_idx, curve in enumerate(curves):
+                    # 尝试获取 x 和 y 数组
+                    # PalmSens 常见键名: x, xValues, X, y, yValues, Y
+                    x = curve.get("x", curve.get("xValues", curve.get("X", [])))
+                    y = curve.get("y", curve.get("yValues", curve.get("Y", [])))
                     
-                    df = pd.DataFrame({'V': x, 'I': y})
-                    datasets[name] = df
+                    if x and y and len(x) > 0 and len(y) > 0:
+                        # 构建名称
+                        # 使用文件名作为前缀，避免多文件混淆
+                        clean_fname = file.name.rsplit('.', 1)[0]
+                        name = f"{clean_fname}"
+                        
+                        # 只有当文件里包含多个 measurement 时才加后缀，保持图例简洁
+                        if len(all_json_objects) > 1 or len(measurements) > 1:
+                            name += f"_{title}"
+                        if len(curves) > 1:
+                            name += f"_Curve{c_idx+1}"
+                        
+                        # 存入 DataFrame
+                        df = pd.DataFrame({'V': x, 'I': y})
+                        datasets[name] = df
                     
     except Exception as e:
-        st.error(f"解析 .pssession 出错: {e}")
+        st.error(f"解析 .pssession 文件 {file.name} 时出错: {str(e)}")
         
     return datasets
 
@@ -69,7 +102,8 @@ def parse_spreadsheet(file):
     Row 0: Sample Name, Empty, Sample Name 2...
     Row 1: V, I, V, I...
     """
-    if file.name.endswith('.csv'):
+    filename = file.name
+    if filename.endswith('.csv'):
         df_raw = pd.read_csv(file, header=None)
     else:
         df_raw = pd.read_excel(file, header=None)
@@ -122,6 +156,7 @@ with st.sidebar:
     st.subheader("单位转换")
     current_mult = st.selectbox("电流乘数 (用于 .pssession)", 
                                [1, 1e3, 1e6], 
+                               index=2, # 默认选中 x10^6 (A->uA) 因为 pssession 通常是 A
                                format_func=lambda x: "x1 (原始)" if x==1 else ("x10³ (A->mA)" if x==1e3 else "x10⁶ (A->µA)"))
     
     # 坐标轴
@@ -129,6 +164,7 @@ with st.sidebar:
     x_label = st.text_input("X 轴标签", "Potential (V vs. RHE)")
     y_label = st.text_input("Y 轴标签", "Current (µA)")
     reverse_x = st.checkbox("翻转 X 轴 (Reverse Scan)", value=False)
+    reverse_y = st.checkbox("翻转 Y 轴 (IUPAC vs US)", value=False)
 
 # 处理数据
 all_datasets = {}
@@ -136,10 +172,17 @@ if uploaded_files:
     for f in uploaded_files:
         # 将指针重置，以防多次读取
         f.seek(0)
-        if f.name.endswith(('.pssession', '.json')):
+        fname = f.name.lower()
+        
+        # 智能判断解析方式
+        if fname.endswith(('.pssession', '.json')):
             d = parse_pssession(f)
         else:
             d = parse_spreadsheet(f)
+            
+        if not d:
+            st.warning(f"文件 {f.name} 中未找到有效数据，请检查格式。")
+            
         all_datasets.update(d)
 
 # 显示选择区域和图表
@@ -151,7 +194,7 @@ if all_datasets:
         # 颜色配置
         cols = st.columns(len(selected_names) if len(selected_names)<5 else 5)
         colors = {}
-        default_palette = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd']
+        default_palette = ['#1f77b4', '#d62728', '#2ca02c', '#ff7f0e', '#9467bd', '#8c564b', '#e377c2']
         for idx, name in enumerate(selected_names):
             with cols[idx % 5]:
                 colors[name] = st.color_picker(name, default_palette[idx % len(default_palette)])
@@ -167,9 +210,13 @@ if all_datasets:
         
         for name in selected_names:
             df = all_datasets[name]
-            # 应用电流乘数 (主要针对 pssession 的 A -> uA)
-            # 如果是 CSV，通常已经是 uA 了，所以只对 pssession 来源应用可能更合理
-            # 这里为了简单，全局应用。如果 CSV 已经是 uA，选 x1 即可。
+            
+            # 判断是否需要应用乘数
+            # 简单的启发式规则：如果文件名看起来像 CSV，可能已经是 uA 了，不需要再乘
+            # 但为了简单，这里统一受侧边栏控制。
+            # 如果 CSV 数据很大（已经是 uA），用户选 x1 即可。
+            # .pssession 数据通常很小（A），默认选 x10^6 即可。
+            
             y_data = df['I'] * current_mult
             
             ax.plot(df['V'], y_data, label=name, color=colors[name], linewidth=line_width)
@@ -177,10 +224,10 @@ if all_datasets:
         ax.set_xlabel(x_label, fontweight='bold')
         ax.set_ylabel(y_label, fontweight='bold')
         
-        if reverse_x:
-            ax.invert_xaxis()
+        if reverse_x: ax.invert_xaxis()
+        if reverse_y: ax.invert_yaxis()
             
-        # 高水平期刊风格：图例无框，刻度向内
+        # 高水平期刊风格
         ax.legend(frameon=False)
         ax.tick_params(top=True, right=True)
         
@@ -192,11 +239,11 @@ if all_datasets:
         # PDF
         pdf_buffer = io.BytesIO()
         fig.savefig(pdf_buffer, format='pdf', bbox_inches='tight')
-        col1.download_button("下载 PDF (矢量图)", pdf_buffer.getvalue(), "cv_plot.pdf", "application/pdf")
+        col1.download_button("📥 下载 PDF (矢量图)", pdf_buffer.getvalue(), "cv_plot.pdf", "application/pdf")
         # PNG
         png_buffer = io.BytesIO()
         fig.savefig(png_buffer, format='png', dpi=300, bbox_inches='tight')
-        col2.download_button("下载 PNG (高清位图)", png_buffer.getvalue(), "cv_plot.png", "image/png")
+        col2.download_button("📥 下载 PNG (高清位图)", png_buffer.getvalue(), "cv_plot.png", "image/png")
         
     else:
         st.info("请至少选择一条曲线。")
