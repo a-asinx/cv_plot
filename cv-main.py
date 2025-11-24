@@ -7,6 +7,7 @@ import numpy as np
 import io
 import json
 import os
+from scipy.signal import find_peaks
 
 # --- 页面基础配置 ---
 st.set_page_config(
@@ -16,7 +17,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 核心解析模块 (保持最强递归搜索逻辑)
+# 核心解析模块 (保持不变)
 # ==========================================
 
 def extract_values_from_list(data_list):
@@ -157,6 +158,36 @@ def parse_spreadsheet(file):
         if not sub.empty: res[name] = sub
     return res
 
+# --- 峰值检测函数 ---
+def analyze_peaks(x_data, y_data, prominence):
+    """寻找峰值"""
+    x = np.array(x_data)
+    y = np.array(y_data)
+    
+    # 寻找极大值 (氧化峰/阳极峰)
+    peaks_max_idx, _ = find_peaks(y, prominence=prominence)
+    
+    # 寻找极小值 (还原峰/阴极峰) - 通过反转 Y 轴寻找
+    peaks_min_idx, _ = find_peaks(-y, prominence=prominence)
+    
+    results = []
+    # 整理阳极峰
+    for idx in peaks_max_idx:
+        results.append({
+            "类型": "氧化峰 (Anodic)",
+            "电位 (V)": x[idx],
+            "电流 (µA)": y[idx]
+        })
+    # 整理阴极峰
+    for idx in peaks_min_idx:
+        results.append({
+            "类型": "还原峰 (Cathodic)",
+            "电位 (V)": x[idx],
+            "电流 (µA)": y[idx]
+        })
+        
+    return results
+
 # ==========================================
 # UI 与 绘图逻辑
 # ==========================================
@@ -169,17 +200,14 @@ with st.sidebar:
     
     # --- 字体上传逻辑 ---
     st.markdown("**🛠️ 解决中文乱码：**")
-    font_file = st.file_uploader("上传中文字体 (.ttf)", type=["ttf"], help="例如 SimHei.ttf 或 Microsoft YaHei.ttf，上传后中文即可正常显示。")
+    font_file = st.file_uploader("上传中文字体 (.ttf)", type=["ttf"], help="例如 SimHei.ttf 或 Microsoft YaHei.ttf")
     
     custom_font_name = None
     if font_file:
         try:
-            # 保存临时字体文件
             font_path = "custom_font.ttf"
             with open(font_path, "wb") as f:
                 f.write(font_file.getbuffer())
-            
-            # 注册字体
             fm.fontManager.addfont(font_path)
             font_prop = fm.FontProperties(fname=font_path)
             custom_font_name = font_prop.get_name()
@@ -187,12 +215,10 @@ with st.sidebar:
         except Exception as e:
             st.error(f"字体加载失败: {e}")
 
-    # 字体选择
     font_options = ["Arial", "Times New Roman", "Helvetica"]
     if custom_font_name:
-        font_options.insert(0, custom_font_name) # 将自定义字体设为首选
+        font_options.insert(0, custom_font_name) 
     else:
-        # 尝试检测系统是否有中文字体
         system_fonts = [f.name for f in fm.fontManager.ttflist]
         if "SimHei" in system_fonts: font_options.insert(0, "SimHei")
         if "Microsoft YaHei" in system_fonts: font_options.insert(0, "Microsoft YaHei")
@@ -201,22 +227,20 @@ with st.sidebar:
     font_sz = st.slider("字号", 10, 28, 16)
     line_w = st.slider("线条粗细", 1.0, 5.0, 2.0)
     
+    st.subheader("图例设置")
+    separate_legend = st.checkbox("独立图例 (Separate Legend)", False, help="勾选后，图注和曲线图将分开生成，方便排版。")
+    
     st.subheader("坐标轴")
     box_style = st.checkbox("全边框 (Box Style)", True)
     tick_dir = st.radio("刻度方向", ["in (内)", "out (外)"], index=0)
     
-    # --- Y轴数值控制 (关键更新) ---
     st.subheader("Y轴 范围/单位控制")
-    st.markdown("调整倍率使 Y 轴数值显示在 **100** 左右：")
-    
-    # 智能预设
     mult_mode = st.radio("倍率模式", ["常用预设", "自定义"], horizontal=True)
-    
     if mult_mode == "常用预设":
         current_mult = st.selectbox(
             "选择倍率", 
             [1.0, 1e3, 1e6, 1e-3], 
-            index=2, # 默认 1e6, 适合 pssession 的 Amps -> uA
+            index=2, # 默认 1e6
             format_func=lambda x: f"x{x:.0e} (推荐: A → µA)" if x==1e6 else (f"x{x} (原始数据)" if x==1 else f"x{x:.0e}")
         )
     else:
@@ -224,10 +248,16 @@ with st.sidebar:
 
     # X轴控制
     potential_mult = st.selectbox("X轴 倍率", [1, 1e-3], index=0, format_func=lambda x: "x1 (V)" if x==1 else "mV → V")
+    
+    # --- 峰值分析设置 ---
+    st.header("3. 峰值分析设置")
+    show_peaks_on_plot = st.checkbox("在图中标注峰值", False)
+    peak_prominence = st.number_input("峰值灵敏度 (Prominence)", value=1.0, step=0.1, help="数值越小越灵敏。")
+
 
 st.title("📊 CV 科研绘图工具")
 if not font_file:
-    st.info("💡 提示：如果在图表中看到“方块”乱码，请在左侧侧边栏上传一个中文字体文件 (如 simhei.ttf)。")
+    st.info("💡 提示：如果中文乱码，请在左侧上传中文字体文件。")
 
 # 1. 数据解析
 data_pool = {}
@@ -252,12 +282,10 @@ if data_pool:
                     new_label = st.text_input(f"曲线 {idx+1}", value=name, key=f"lbl_{name}")
                     custom_labels[name] = new_label
         
-        # 标签 (默认单位修改为 uA)
         c1, c2 = st.columns(2)
         xlabel = c1.text_input("X 轴标签", "Potential (V)")
         ylabel = c2.text_input("Y 轴标签", "Current (μA)") 
 
-        # 配色
         cols = st.columns(len(sel))
         palette = ['#CC3333', '#3366CC', '#009966', '#FF9900', '#9933CC', '#666666']
         color_map = {}
@@ -265,10 +293,8 @@ if data_pool:
             with cols[i % len(cols)]:
                 color_map[name] = st.color_picker(f"Color: {custom_labels[name]}", palette[i % len(palette)])
 
-        # --- 绘图 ---
-        # 字体应用
+        # --- 绘图配置 ---
         mpl.rcParams['font.family'] = 'sans-serif'
-        # 确保负号正常显示
         mpl.rcParams['axes.unicode_minus'] = False 
         
         if custom_font_name:
@@ -279,19 +305,34 @@ if data_pool:
         mpl.rcParams['font.size'] = font_sz
         mpl.rcParams['axes.linewidth'] = 1.5
         
+        # 创建画布
         fig, ax = plt.subplots(figsize=(6, 4.8), dpi=150)
         
+        all_peak_data = [] # 存储所有峰值数据用于表格
+        plot_handles = []  # 存储用于图例的句柄
+        plot_labels = []   # 存储用于图例的标签
+
         for name in sel:
             df = data_pool[name]
-            # 数据处理
             x = df['V'] * potential_mult
             y = df['I'] * current_mult 
             
-            ax.plot(x, y, 
-                    label=custom_labels[name], 
-                    color=color_map[name], 
-                    linewidth=line_w)
+            label_text = custom_labels[name]
+            line, = ax.plot(x, y, label=label_text, color=color_map[name], linewidth=line_w)
             
+            # 收集句柄用于独立图例
+            plot_handles.append(line)
+            plot_labels.append(label_text)
+            
+            # --- 峰值计算 ---
+            peaks = analyze_peaks(x, y, peak_prominence)
+            if peaks:
+                for p in peaks:
+                    p["曲线名称"] = label_text
+                    all_peak_data.append(p)
+                    if show_peaks_on_plot:
+                        ax.plot(p["电位 (V)"], p["电流 (µA)"], "x", color='black', markersize=6)
+        
         # 样式复刻
         ax.set_xlabel(xlabel, fontweight='bold', labelpad=10)
         ax.set_ylabel(ylabel, fontweight='bold', labelpad=10)
@@ -307,22 +348,81 @@ if data_pool:
             for spine in ax.spines.values():
                 spine.set_linewidth(1.5)
                 spine.set_color('black')
+        
+        # --- 图例处理 ---
+        if not separate_legend:
+            # 默认模式：图例在图内
+            ax.legend(frameon=False, fontsize=font_sz-2, loc='best')
+        else:
+            # 独立图例模式：不在主图绘制图例
+            pass
 
-        ax.legend(frameon=False, fontsize=font_sz-2, loc='best')
         plt.tight_layout()
 
-        # --- 关键：自适应展示 ---
-        st.pyplot(fig, use_container_width=True)
+        # === 布局展示 ===
+        if not separate_legend:
+            # 模式 A: 正常显示
+            st.pyplot(fig, use_container_width=True)
+            
+            # 导出图片
+            col1, col2 = st.columns(2)
+            pdf_buf = io.BytesIO()
+            fig.savefig(pdf_buf, format='pdf', bbox_inches='tight')
+            col1.download_button("📥 下载完整 PDF", pdf_buf.getvalue(), "cv_plot.pdf", "application/pdf")
+            
+            png_buf = io.BytesIO()
+            fig.savefig(png_buf, format='png', dpi=300, bbox_inches='tight')
+            col2.download_button("📥 下载完整 PNG", png_buf.getvalue(), "cv_plot.png", "image/png")
+            
+        else:
+            # 模式 B: 分离显示
+            st.markdown("### 预览 (分离模式)")
+            c_plot, c_legend = st.columns([3, 1])
+            
+            # 1. 展示主图 (无图例)
+            with c_plot:
+                st.markdown("**1. 纯净曲线图**")
+                st.pyplot(fig, use_container_width=True)
+                
+                # 导出主图
+                pdf_plot = io.BytesIO()
+                fig.savefig(pdf_plot, format='pdf', bbox_inches='tight')
+                st.download_button("📥 下载曲线图 PDF", pdf_plot.getvalue(), "cv_curve_only.pdf", "application/pdf")
+                
+                png_plot = io.BytesIO()
+                fig.savefig(png_plot, format='png', dpi=300, bbox_inches='tight')
+                st.download_button("📥 下载曲线图 PNG", png_plot.getvalue(), "cv_curve_only.png", "image/png")
+
+            # 2. 生成并展示独立图例
+            with c_legend:
+                st.markdown("**2. 独立图例**")
+                # 创建专门画图例的 figure
+                fig_leg, ax_leg = plt.subplots(figsize=(2, 0.5 * len(sel) + 0.5), dpi=150)
+                ax_leg.axis('off') # 隐藏坐标轴
+                ax_leg.legend(plot_handles, plot_labels, loc='center', frameon=False, fontsize=font_sz)
+                st.pyplot(fig_leg, use_container_width=True)
+                
+                # 导出图例
+                pdf_leg = io.BytesIO()
+                fig_leg.savefig(pdf_leg, format='pdf', bbox_inches='tight')
+                st.download_button("📥 下载图例 PDF", pdf_leg.getvalue(), "cv_legend_only.pdf", "application/pdf")
+                
+                png_leg = io.BytesIO()
+                fig_leg.savefig(png_leg, format='png', dpi=300, bbox_inches='tight')
+                st.download_button("📥 下载图例 PNG", png_leg.getvalue(), "cv_legend_only.png", "image/png")
         
-        # 导出
-        col1, col2 = st.columns(2)
-        pdf_buf = io.BytesIO()
-        fig.savefig(pdf_buf, format='pdf', bbox_inches='tight')
-        col1.download_button("📥 下载 PDF", pdf_buf.getvalue(), "cv_plot.pdf", "application/pdf")
-        
-        png_buf = io.BytesIO()
-        fig.savefig(png_buf, format='png', dpi=300, bbox_inches='tight')
-        col2.download_button("📥 下载 PNG", png_buf.getvalue(), "cv_plot.png", "image/png")
+        # --- 4. 峰值数据展示区 ---
+        st.markdown("---")
+        st.markdown("### 4. 峰值数据统计")
+        if all_peak_data:
+            peak_df = pd.DataFrame(all_peak_data)
+            cols_order = ["曲线名称", "类型", "电位 (V)", "电流 (µA)"]
+            peak_df = peak_df[cols_order]
+            st.dataframe(peak_df, use_container_width=True)
+            csv = peak_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button("📥 导出峰值数据 (CSV)", csv, "cv_peaks.csv", "text/csv")
+        else:
+            st.info("未检测到明显的峰值。请调整“峰值灵敏度”。")
 
 else:
     st.info("👈 请在左侧上传数据文件开始。")
