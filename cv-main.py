@@ -2,19 +2,21 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib as mpl
+import matplotlib.font_manager as fm
 import numpy as np
 import io
 import json
+import os
 
 # --- 页面基础配置 ---
 st.set_page_config(
-    page_title="CV 科研绘图 (中文支持版)",
+    page_title="CV 科研绘图 (中文专业版)",
     page_icon="⚡",
     layout="wide"
 )
 
 # ==========================================
-# 核心解析模块 (保持最强版本逻辑)
+# 核心解析模块 (保持最强递归搜索逻辑)
 # ==========================================
 
 def extract_values_from_list(data_list):
@@ -163,42 +165,69 @@ with st.sidebar:
     st.header("1. 数据导入")
     files = st.file_uploader("上传数据 (.pssession, .csv, .xlsx)", accept_multiple_files=True)
     
-    st.header("2. 全局样式设置")
+    st.header("2. 样式与中文支持")
     
-    # --- 字体设置 (增加中文支持) ---
-    font_options = ["Arial", "Times New Roman", "SimHei", "Microsoft YaHei", "Helvetica"]
-    font_fam = st.selectbox("字体 (SimHei/YaHei 支持中文)", font_options, index=0)
-    font_sz = st.slider("字号 (Size)", 10, 28, 16)
-    line_w = st.slider("线条粗细 (Width)", 1.0, 5.0, 2.0)
+    # --- 字体上传逻辑 ---
+    st.markdown("**🛠️ 解决中文乱码：**")
+    font_file = st.file_uploader("上传中文字体 (.ttf)", type=["ttf"], help="例如 SimHei.ttf 或 Microsoft YaHei.ttf，上传后中文即可正常显示。")
     
-    st.subheader("坐标轴样式")
-    tick_dir = st.radio("刻度方向", ["in (朝内)", "out (朝外)"], index=0)
-    show_grid = st.checkbox("显示网格", False)
-    box_style = st.checkbox("全边框 (Box Style)", True)
-    
-    # --- 数据处理 (增强版) ---
-    st.subheader("数据单位处理")
-    
-    # 电位 (X轴)
-    potential_mult = st.selectbox("X轴 倍率", [1, 1e-3], index=0, 
-                                  format_func=lambda x: "x1 (V)" if x==1 else "x10⁻³ (mV -> V)")
-    
-    # 电流 (Y轴)
-    # 增加自定义输入，满足用户想把数值调整到 100 左右的需求
-    st.write("Y轴 倍率设置:")
-    use_custom_mult = st.checkbox("使用自定义倍率", False)
-    
-    if use_custom_mult:
-        custom_mult_val = st.number_input("输入倍率值", value=1.0, format="%.4e")
-        current_mult = custom_mult_val
-    else:
-        # 提供常用预设
-        current_mult_preset = st.selectbox("选择预设倍率", [1, 1e3, 1e6, 1e-3], index=2, 
-                                     format_func=lambda x: f"x{x:.0e} (推荐: A->µA)" if x==1e6 else (f"x{x} (原始)" if x==1 else f"x{x:.0e}"))
-        current_mult = current_mult_preset
+    custom_font_name = None
+    if font_file:
+        try:
+            # 保存临时字体文件
+            font_path = "custom_font.ttf"
+            with open(font_path, "wb") as f:
+                f.write(font_file.getbuffer())
+            
+            # 注册字体
+            fm.fontManager.addfont(font_path)
+            font_prop = fm.FontProperties(fname=font_path)
+            custom_font_name = font_prop.get_name()
+            st.success(f"字体 {custom_font_name} 加载成功！")
+        except Exception as e:
+            st.error(f"字体加载失败: {e}")
 
-st.title("📊 CV 学术绘图工具")
-st.markdown("支持中文显示、单位自定义缩放及自适应布局。")
+    # 字体选择
+    font_options = ["Arial", "Times New Roman", "Helvetica"]
+    if custom_font_name:
+        font_options.insert(0, custom_font_name) # 将自定义字体设为首选
+    else:
+        # 尝试检测系统是否有中文字体
+        system_fonts = [f.name for f in fm.fontManager.ttflist]
+        if "SimHei" in system_fonts: font_options.insert(0, "SimHei")
+        if "Microsoft YaHei" in system_fonts: font_options.insert(0, "Microsoft YaHei")
+
+    font_fam = st.selectbox("选择字体", font_options, index=0)
+    font_sz = st.slider("字号", 10, 28, 16)
+    line_w = st.slider("线条粗细", 1.0, 5.0, 2.0)
+    
+    st.subheader("坐标轴")
+    box_style = st.checkbox("全边框 (Box Style)", True)
+    tick_dir = st.radio("刻度方向", ["in (内)", "out (外)"], index=0)
+    
+    # --- Y轴数值控制 (关键更新) ---
+    st.subheader("Y轴 范围/单位控制")
+    st.markdown("调整倍率使 Y 轴数值显示在 **100** 左右：")
+    
+    # 智能预设
+    mult_mode = st.radio("倍率模式", ["常用预设", "自定义"], horizontal=True)
+    
+    if mult_mode == "常用预设":
+        current_mult = st.selectbox(
+            "选择倍率", 
+            [1.0, 1e3, 1e6, 1e-3], 
+            index=2, # 默认 1e6, 适合 pssession 的 Amps -> uA
+            format_func=lambda x: f"x{x:.0e} (推荐: A → µA)" if x==1e6 else (f"x{x} (原始数据)" if x==1 else f"x{x:.0e}")
+        )
+    else:
+        current_mult = st.number_input("输入自定义倍率", value=1e6, format="%.2e")
+
+    # X轴控制
+    potential_mult = st.selectbox("X轴 倍率", [1, 1e-3], index=0, format_func=lambda x: "x1 (V)" if x==1 else "mV → V")
+
+st.title("📊 CV 科研绘图工具")
+if not font_file:
+    st.info("💡 提示：如果在图表中看到“方块”乱码，请在左侧侧边栏上传一个中文字体文件 (如 simhei.ttf)。")
 
 # 1. 数据解析
 data_pool = {}
@@ -210,24 +239,23 @@ if files:
 
 if data_pool:
     # 2. 数据选择
-    st.markdown("### 3. 曲线选择与编辑")
     all_keys = list(data_pool.keys())
-    sel = st.multiselect("选择要绘制的曲线", all_keys, default=all_keys[:3] if len(all_keys) > 3 else all_keys)
+    sel = st.multiselect("选择曲线", all_keys, default=all_keys[:3] if len(all_keys) > 3 else all_keys)
     
     if sel:
-        # --- 图例编辑区 ---
-        with st.expander("📝 编辑图例名称 (支持中文)", expanded=True):
+        # --- 图例编辑 ---
+        with st.expander("📝 图例名称编辑 (支持 LaTeX)", expanded=True):
             col1, col2 = st.columns(2)
             custom_labels = {}
             for idx, name in enumerate(sel):
                 with col1 if idx % 2 == 0 else col2:
-                    new_label = st.text_input(f"曲线 {idx+1}:", value=name, key=f"lbl_{name}")
+                    new_label = st.text_input(f"曲线 {idx+1}", value=name, key=f"lbl_{name}")
                     custom_labels[name] = new_label
         
-        # 坐标轴标签
+        # 标签 (默认单位修改为 uA)
         c1, c2 = st.columns(2)
         xlabel = c1.text_input("X 轴标签", "Potential (V vs. RHE)")
-        ylabel = c2.text_input("Y 轴标签", "Current (µA)") # 用户可手动改为 Current Density 等
+        ylabel = c2.text_input("Y 轴标签", "Current (µA)") 
 
         # 配色
         cols = st.columns(len(sel))
@@ -235,26 +263,29 @@ if data_pool:
         color_map = {}
         for i, name in enumerate(sel):
             with cols[i % len(cols)]:
-                color_map[name] = st.color_picker(f"{custom_labels[name]}", palette[i % len(palette)])
+                color_map[name] = st.color_picker(f"Color: {custom_labels[name]}", palette[i % len(palette)])
 
-        # --- 绘图核心 ---
-        # 1. 字体设置
-        mpl.rcParams['font.family'] = 'sans-serif' # 先设为通用
-        if font_fam in ["SimHei", "Microsoft YaHei"]:
-            mpl.rcParams['font.sans-serif'] = [font_fam, 'Arial'] # 优先用中文字体
+        # --- 绘图 ---
+        # 字体应用
+        mpl.rcParams['font.family'] = 'sans-serif'
+        # 确保负号正常显示
+        mpl.rcParams['axes.unicode_minus'] = False 
+        
+        if custom_font_name:
+            mpl.rcParams['font.sans-serif'] = [custom_font_name, 'Arial']
         else:
-            mpl.rcParams['font.sans-serif'] = [font_fam, 'SimHei', 'Arial'] # 英文优先，备选中文
+            mpl.rcParams['font.sans-serif'] = [font_fam, 'SimHei', 'Arial']
             
         mpl.rcParams['font.size'] = font_sz
         mpl.rcParams['axes.linewidth'] = 1.5
-        mpl.rcParams['axes.unicode_minus'] = False # 关键：解决负号显示为方块的问题
         
         fig, ax = plt.subplots(figsize=(6, 4.8), dpi=150)
         
         for name in sel:
             df = data_pool[name]
+            # 数据处理
             x = df['V'] * potential_mult
-            y = df['I'] * current_mult # 应用倍率
+            y = df['I'] * current_mult 
             
             ax.plot(x, y, 
                     label=custom_labels[name], 
@@ -266,7 +297,6 @@ if data_pool:
         ax.set_ylabel(ylabel, fontweight='bold', labelpad=10)
         
         tick_direction = 'in' if 'in' in tick_dir else 'out'
-        
         ax.tick_params(which='major', direction=tick_direction, length=6, width=1.5, 
                        top=box_style, right=box_style, bottom=True, left=True)
         ax.minorticks_on()
@@ -278,27 +308,20 @@ if data_pool:
                 spine.set_linewidth(1.5)
                 spine.set_color('black')
 
-        if show_grid:
-            ax.grid(True, linestyle='--', alpha=0.5)
-
         ax.legend(frameon=False, fontsize=font_sz-2, loc='best')
-        
         plt.tight_layout()
 
-        # --- 关键修改：自适应宽度 ---
-        # use_container_width=True 让图片跟随网页宽度缩放
+        # --- 关键：自适应展示 ---
         st.pyplot(fig, use_container_width=True)
         
         # 导出
-        st.markdown("### 4. 图片导出")
         col1, col2 = st.columns(2)
-        
         pdf_buf = io.BytesIO()
         fig.savefig(pdf_buf, format='pdf', bbox_inches='tight')
         col1.download_button("📥 下载 PDF", pdf_buf.getvalue(), "cv_plot.pdf", "application/pdf")
         
         png_buf = io.BytesIO()
-        fig.savefig(png_buf, format='png', dpi=600, bbox_inches='tight')
+        fig.savefig(png_buf, format='png', dpi=300, bbox_inches='tight')
         col2.download_button("📥 下载 PNG", png_buf.getvalue(), "cv_plot.png", "image/png")
 
 else:
